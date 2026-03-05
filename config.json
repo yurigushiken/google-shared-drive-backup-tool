@@ -1,0 +1,10 @@
+{
+  "shared_drive_id": "0ANrqIuJZcnvTUk9PVA",
+  "mirror_root_path": "mirror",
+  "report_dir": "reports",
+  "log_dir": "logs",
+  "include_shared_items": false,
+  "calculate_drive_totals_before_backup": false,
+  "use_changes_api_on_update": true,
+  "changes_page_size": 1000
+}

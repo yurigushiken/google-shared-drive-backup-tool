@@ -1,0 +1,39 @@
+# Python cache/build
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# OS/editor artifacts
+.DS_Store
+Thumbs.db
+._*
+
+# Credentials/secrets (never commit)
+client_secret.json
+credentials.json
+token.pickle
+
+# Local config/state
+config.local.json
+metadata/
+
+# Generated runtime outputs
+mirror/
+reports/
+logs/
+screenshots/
+
+# Local backup folders
+(old backup)/
+manual_backup_*/
+
+# Temp directories used for comparisons
+_repo_compare*/
+
+# Keep tests tracked by default (no ignore here)

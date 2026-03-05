@@ -2,6 +2,17 @@
 
 This tool creates local backups of a Google Shared Drive with two modes: `update` and `full`.
 
+## Prerequisites
+
+- Python 3.10+ recommended
+- Installed dependencies:
+  ```bash
+  pip install google-api-python-client google-auth-httplib2 google-auth-oauthlib
+  ```
+- Local OAuth files (not committed to git):
+  - `credentials.json` (OAuth client credentials)
+  - `token.pickle` (created automatically after first login)
+
 ## Current behavior (as of March 2026)
 
 - `full` mode creates a new timestamped mirror folder and downloads everything.
@@ -54,6 +65,19 @@ GoogleDriveBackupTool/
    ```
 3. Run `run_backup.command` and choose `update` or `full`.
 
+### CLI overrides (optional)
+
+```bash
+python drive_backup.py --config config.json --report-dir reports --log-dir logs
+```
+
+Supported overrides:
+- `--config`
+- `--drive-id`
+- `--output-dir`
+- `--report-dir`
+- `--log-dir`
+
 ## Configuration (`config.json`)
 
 ```json
@@ -68,6 +92,8 @@ GoogleDriveBackupTool/
   "changes_page_size": 1000
 }
 ```
+
+If `config.json` is missing, internal fallback defaults are used. In that fallback path, `mirror_root_path` defaults to `backups` (not `mirror`).
 
 ### Config notes
 
@@ -86,6 +112,25 @@ GoogleDriveBackupTool/
 - If token state is missing/invalid, one fallback run may still take longer (full recursive scan).
 - The tool uses retry + exponential backoff for transient API/network issues.
 - API export limits still apply to some Google Workspace files; these appear in report errors.
+
+## Testing
+
+Run the local test suite:
+
+```bash
+pytest -q tests
+```
+
+Compile check:
+
+```bash
+python -m py_compile drive_backup.py
+```
+
+## Git/backup hygiene
+
+- `.gitignore` excludes secrets and generated runtime data (`metadata/`, `mirror/`, `reports/`, `logs/`, backups, cache dirs).
+- Keep `credentials.json`, `token.pickle`, and large backup outputs out of source control.
 
 ## Rollback / safety
 

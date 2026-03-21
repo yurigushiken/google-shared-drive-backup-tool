@@ -173,3 +173,50 @@ def test_changes_update_invalid_token_falls_back_to_full_scan(tmp_path):
 
     assert result is None
     assert len(changes.list_calls) == 1
+
+
+def test_changes_update_counts_error_when_download_returns_error(tmp_path):
+    list_payload = {
+        "changes": [
+            {
+                "fileId": "file-1",
+                "removed": False,
+                "file": {
+                    "id": "file-1",
+                    "name": "doc1",
+                    "mimeType": "application/pdf",
+                    "modifiedTime": "2026-03-01T10:00:00.000Z",
+                    "md5Checksum": "abc",
+                    "size": "12",
+                    "parents": ["folder-1"],
+                    "trashed": False,
+                },
+            }
+        ],
+        "newStartPageToken": "token-new",
+    }
+    changes = _FakeChanges(list_payloads=[list_payload], start_token="token-new")
+    files = _FakeFiles(
+        {
+            "folder-1": {
+                "id": "folder-1",
+                "name": "Folder A",
+                "mimeType": "application/vnd.google-apps.folder",
+                "parents": ["drive-1"],
+                "trashed": False,
+            }
+        }
+    )
+    service = _FakeDriveService(changes, files)
+    backup, target_mirror, _ = _mk_backup(tmp_path, service, sync_state={"last_start_page_token": "token-old"})
+
+    def _fake_download(_file_id, _local_path, _mime_type, file_metadata):
+        file_metadata["error"] = "boom"
+        return "error"
+
+    backup.download_file = _fake_download
+    result = backup.run_update_from_changes(str(target_mirror))
+
+    assert result is not None
+    assert result["errors"] == 1
+    assert any("Error downloading changed file doc1: boom" in msg for msg in backup.report_messages["errors"])

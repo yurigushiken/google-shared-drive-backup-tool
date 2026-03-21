@@ -3,8 +3,18 @@
   "mirror_root_path": "mirror",
   "report_dir": "reports",
   "log_dir": "logs",
+  "tokens_root_dir": "tokens",
+  "token_profile": "yuri",
+  "log_level": "INFO",
   "include_shared_items": false,
   "calculate_drive_totals_before_backup": false,
   "use_changes_api_on_update": true,
-  "changes_page_size": 1000
+  "changes_page_size": 1000,
+  "metadata_save_every_items": 500,
+  "metadata_save_min_seconds": 300,
+  "retry_unresolved_missing_files": true,
+  "max_unresolved_retries_per_run": 200,
+  "retry_manual_required_files": false,
+  "generate_unresolved_report": true,
+  "enable_forms_api_backup": true
 }

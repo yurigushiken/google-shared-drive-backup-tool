@@ -18,6 +18,7 @@ Thumbs.db
 client_secret.json
 credentials.json
 token.pickle
+tokens/
 
 # Local config/state
 config.local.json

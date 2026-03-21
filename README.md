@@ -1,74 +1,90 @@
-﻿# Google Drive Backup Tool
+# Google Shared Drive Backup Tool
 
-This tool creates local backups of a Google Shared Drive with two modes: `update` and `full`.
+Backs up a Google Shared Drive to a local mirror with two modes:
+- `update`: fast incremental sync (Drive Changes API + targeted retries)
+- `full`: new full snapshot baseline
+
+## Status (March 21, 2026)
+
+- `update` and `full` behaviors are covered by tests.
+- Google Forms are backed up via Forms API as `*.form.json`.
+- Lower-fidelity export fallback is enabled for large Workspace files:
+  - Slides: `pptx -> pdf/text`
+  - Sheets: `xlsx -> pdf/csv`
+  - Docs: `docx -> pdf/txt`
+- Unresolved retry includes stale-metadata local-path gaps.
 
 ## Prerequisites
 
 - Python 3.10+ recommended
-- Installed dependencies:
+- Install dependencies:
   ```bash
   pip install google-api-python-client google-auth-httplib2 google-auth-oauthlib
   ```
-- Local OAuth files (not committed to git):
-  - `credentials.json` (OAuth client credentials)
-  - `token.pickle` (created automatically after first login)
+- OAuth client credentials file (one of):
+  - `credentials.json` in repo root, or
+  - `client_secret.json` in repo root, or
+  - profile-local `tokens/<profile>/credentials.json`
 
-## Current behavior (as of March 2026)
+## Multi-User Token Profiles
 
-- `full` mode creates a new timestamped mirror folder and downloads everything.
-- `update` mode first tries Google Drive `changes.list` using stored page tokens (`metadata/changes_state.json`) and processes only changed files.
-- If no token exists yet (first run) or token is rejected by Google, update mode automatically falls back to full recursive scan for that run, then reseeds token state.
-- Deleted files in Drive are not deleted locally (historical preservation).
-- Metadata is centralized in `metadata/central_metadata.json`.
-- Changes API token state is stored in `metadata/changes_state.json`.
-- On Windows, metadata paths are remapped if the drive letter changed (for example `F:` to `D:`) but the same mirror timestamp folder is present.
-- For Google Docs/Sheets/Slides exports, the downloader keeps the real exported extension path in metadata (for example `.docx`, `.xlsx`, `.pptx`).
+Each lab member should use a separate token profile:
 
-## Directory layout
+```text
+tokens/
+  yuri/
+    token.pickle
+  alice/
+    token.pickle
+  bob/
+    token.pickle
+```
+
+Current project default is:
+- `token_profile: "yuri"`
+- `tokens_root_dir: "tokens"`
+
+You can switch active user in either way:
+- Edit `config.json` field `token_profile`
+- Or override at runtime: `--token-profile <name>`
+
+## Directory Layout
 
 ```text
 GoogleDriveBackupTool/
-  run_backup.bat
-  run_backup.command
   drive_backup.py
   config.json
-  credentials.json
-  token.pickle
+  credentials.json (optional shared OAuth client file)
   metadata/
     central_metadata.json
-    central_metadata.json.bak
     changes_state.json
-  reports/
-    backup_report_*.txt
-  logs/
-    backup_log_*.txt
   mirror/
     mirror-YYYYMMDD-HHMMSS/
+  reports/
+    backup_report_*.txt
+    unresolved_files_*.csv
+  logs/
+    backup_log_*.txt
+  tokens/
+    <profile>/
+      token.pickle
 ```
 
 ## Usage
 
 ### Windows
-1. Double-click `run_backup.bat`.
-2. Choose mode:
-   - `update`: update latest mirror snapshot (daily usage).
-   - `full`: create a new full snapshot.
+1. Run `run_backup.bat`
+2. Choose `update` or `full`
 
-### macOS
-1. Install prerequisites once:
-   ```bash
-   pip3 install google-api-python-client google-auth-httplib2 google-auth-oauthlib
-   ```
-2. Make launcher executable once:
-   ```bash
-   chmod +x run_backup.command
-   ```
-3. Run `run_backup.command` and choose `update` or `full`.
+### macOS/Linux
+```bash
+python drive_backup.py
+```
 
-### CLI overrides (optional)
+### Useful CLI Overrides
 
 ```bash
-python drive_backup.py --config config.json --report-dir reports --log-dir logs
+python drive_backup.py --config config.json --token-profile yuri --log-level INFO
 ```
 
 Supported overrides:
@@ -77,6 +93,14 @@ Supported overrides:
 - `--output-dir`
 - `--report-dir`
 - `--log-dir`
+- `--log-level`
+- `--token-profile`
+- `--tokens-root-dir`
+- `--credentials-file`
+- `--token-file`
+- `--max-unresolved-retries`
+- `--retry-manual-required`
+- `--disable-forms-api-backup`
 
 ## Configuration (`config.json`)
 
@@ -86,60 +110,47 @@ Supported overrides:
   "mirror_root_path": "mirror",
   "report_dir": "reports",
   "log_dir": "logs",
+  "tokens_root_dir": "tokens",
+  "token_profile": "yuri",
+  "log_level": "INFO",
   "include_shared_items": false,
   "calculate_drive_totals_before_backup": false,
   "use_changes_api_on_update": true,
-  "changes_page_size": 1000
+  "changes_page_size": 1000,
+  "metadata_save_every_items": 500,
+  "metadata_save_min_seconds": 300,
+  "retry_unresolved_missing_files": true,
+  "max_unresolved_retries_per_run": 200,
+  "retry_manual_required_files": false,
+  "generate_unresolved_report": true,
+  "enable_forms_api_backup": true
 }
 ```
 
-If `config.json` is missing, internal fallback defaults are used. In that fallback path, `mirror_root_path` defaults to `backups` (not `mirror`).
+## Team Onboarding (OAuth + API Setup)
 
-### Config notes
+Use the step-by-step web guide in [`docs/index.html`](docs/index.html).
 
-- `calculate_drive_totals_before_backup`:
-  - `false` (recommended): skips expensive full-drive size/count pre-scan to improve update start time.
-  - `true`: runs pre-scan and adds drive totals/percentage info to reports.
-- `use_changes_api_on_update`:
-  - `true` (recommended): update mode uses Drive Changes API token-based incremental sync.
-  - `false`: update mode uses the older full recursive listing approach.
-- `changes_page_size`:
-  - Changes API page size (default `1000`).
+Expected GitHub Pages URL for this repo:
+- `https://yurigushiken.github.io/google-shared-drive-backup-tool/`
 
-## Performance notes
+## Recommended Workflow
 
-- After token seeding, most update runs avoid full recursive listing and are substantially faster on large drives.
-- If token state is missing/invalid, one fallback run may still take longer (full recursive scan).
-- The tool uses retry + exponential backoff for transient API/network issues.
-- API export limits still apply to some Google Workspace files; these appear in report errors.
+1. Use `update` routinely.
+2. Use `full` only for intentional baseline snapshots.
+3. Review `reports/backup_report_*.txt`.
+4. If needed, review unresolved CSV:
+   - `reports/unresolved_files_<timestamp>.csv`
 
-## Testing
-
-Run the local test suite:
+## Tests
 
 ```bash
-pytest -q tests
-```
-
-Compile check:
-
-```bash
+python -m pytest -q
 python -m py_compile drive_backup.py
 ```
 
-## Git/backup hygiene
+## Security / Git Hygiene
 
-- `.gitignore` excludes secrets and generated runtime data (`metadata/`, `mirror/`, `reports/`, `logs/`, backups, cache dirs).
-- Keep `credentials.json`, `token.pickle`, and large backup outputs out of source control.
+- Never commit `token.pickle` or personal credentials.
+- Keep `metadata/`, `mirror/`, `reports/`, `logs/` out of source control.
 
-## Rollback / safety
-
-If a new code change does not work:
-
-1. Restore from local code backup copies (for example `manual_backup_YYYYMMDD-HHMMSS/drive_backup.py.bak`).
-2. Restore metadata from `metadata/central_metadata.json.bak` if needed.
-3. Existing `mirror/mirror-*` snapshots are preserved; they are not overwritten by rollback.
-
-## Initial authentication
-
-On first run, browser OAuth will open. Sign in and authorize Drive read access.

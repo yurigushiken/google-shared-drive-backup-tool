@@ -2,6 +2,7 @@
 import os
 import io
 import json
+import csv
 import pickle
 import datetime
 import re
@@ -129,7 +130,11 @@ def retry_with_backoff(max_retries=5, initial_backoff=1, backoff_multiplier=2, m
     return decorator
 
 # Define API scopes for authentication
-SCOPES = ['https://www.googleapis.com/auth/drive.readonly']
+SCOPES = [
+    'https://www.googleapis.com/auth/drive.readonly',
+    'https://www.googleapis.com/auth/forms.body.readonly',
+    'https://www.googleapis.com/auth/forms.responses.readonly',
+]
 
 # Define export MIME types for Google Workspace files
 GOOGLE_MIME_EXPORT_MAP = {
@@ -138,8 +143,57 @@ GOOGLE_MIME_EXPORT_MAP = {
     'application/vnd.google-apps.presentation': {'mime': 'application/vnd.openxmlformats-officedocument.presentationml.presentation', 'ext': 'pptx'},
     'application/vnd.google-apps.drawing': {'mime': 'image/png', 'ext': 'png'},
     'application/vnd.google-apps.script': {'mime': 'application/vnd.google-apps.script+json', 'ext': 'json'},
-    'application/vnd.google-apps.jam': {'mime': 'application/pdf', 'ext': 'pdf'},
-    'application/vnd.google-apps.form': {'mime': 'application/pdf', 'ext': 'pdf'}
+    'application/vnd.google-apps.jam': {'mime': 'application/pdf', 'ext': 'pdf'}
+}
+
+PREFERRED_EXPORT_MIMES = {
+    'application/vnd.google-apps.document': [
+        'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+        'application/pdf',
+        'text/plain',
+    ],
+    'application/vnd.google-apps.spreadsheet': [
+        'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+        'application/pdf',
+        'text/csv',
+    ],
+    'application/vnd.google-apps.presentation': [
+        'application/vnd.openxmlformats-officedocument.presentationml.presentation',
+        'application/pdf',
+        'text/plain',
+    ],
+    'application/vnd.google-apps.drawing': [
+        'image/png',
+        'application/pdf',
+    ],
+    'application/vnd.google-apps.script': [
+        'application/vnd.google-apps.script+json',
+    ],
+    'application/vnd.google-apps.jam': [
+        'application/pdf',
+    ],
+}
+
+EXPORT_MIME_TO_EXT = {
+    'application/vnd.openxmlformats-officedocument.wordprocessingml.document': 'docx',
+    'application/vnd.oasis.opendocument.text': 'odt',
+    'application/rtf': 'rtf',
+    'application/pdf': 'pdf',
+    'text/plain': 'txt',
+    'application/zip': 'zip',
+    'application/epub+zip': 'epub',
+    'text/markdown': 'md',
+    'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet': 'xlsx',
+    'application/vnd.oasis.opendocument.spreadsheet': 'ods',
+    'text/csv': 'csv',
+    'text/tab-separated-values': 'tsv',
+    'application/vnd.openxmlformats-officedocument.presentationml.presentation': 'pptx',
+    'application/vnd.oasis.opendocument.presentation': 'odp',
+    'image/jpeg': 'jpg',
+    'image/png': 'png',
+    'image/svg+xml': 'svg',
+    'application/vnd.google-apps.script+json': 'json',
+    'video/mp4': 'mp4',
 }
 
 # Define download chunk size (10MB)
@@ -182,27 +236,32 @@ os.makedirs(mirror_root_path, exist_ok=True)
 os.makedirs(metadata_directory, exist_ok=True)
 os.makedirs(reports_directory, exist_ok=True)
 
-def get_latest_mirror_directory():
+def get_latest_mirror_directory(mirror_root=None):
     """Find the most recent mirror directory based on timestamp in the name."""
-    mirror_dirs = glob.glob(os.path.join(mirror_root_path, "mirror-*"))
+    base_root = mirror_root if mirror_root else mirror_root_path
+    base_root = ensure_long_path_support(base_root)
+    mirror_dirs = glob.glob(os.path.join(base_root, "mirror-*"))
     
     if not mirror_dirs:
         return None
     
-    # Sort directories by creation time (newest first)
-    mirror_dirs.sort(key=lambda x: os.path.getctime(x), reverse=True)
+    # Prefer creation time, then lexicographic name as a deterministic tie-breaker.
+    mirror_dirs.sort(key=lambda x: (os.path.getctime(x), x), reverse=True)
     return ensure_long_path_support(mirror_dirs[0])
 
-def create_new_mirror_directory():
+def create_new_mirror_directory(mirror_root=None):
     """Create a new timestamped mirror directory."""
+    base_root = mirror_root if mirror_root else mirror_root_path
+    base_root = ensure_long_path_support(base_root)
+    os.makedirs(base_root, exist_ok=True)
     timestamp = datetime.datetime.now().strftime('%Y%m%d-%H%M%S')
-    mirror_dir = os.path.join(mirror_root_path, f"mirror-{timestamp}")
+    mirror_dir = os.path.join(base_root, f"mirror-{timestamp}")
     # Apply long path support
     mirror_dir = ensure_long_path_support(mirror_dir)
     os.makedirs(mirror_dir, exist_ok=True)
     return mirror_dir
 
-def save_metadata(metadata, file_path='metadata.json'):
+def save_metadata(metadata, file_path='metadata.json', create_backup=True):
     """
     Saves metadata to a JSON file.
     
@@ -222,7 +281,7 @@ def save_metadata(metadata, file_path='metadata.json'):
             os.makedirs(metadata_dir, exist_ok=True)
         
         # If the file exists, create a backup first
-        if os.path.exists(file_path):
+        if create_backup and os.path.exists(file_path):
             try:
                 logging.info(f"Creating backup of existing metadata file to {backup_path}")
                 shutil.copy2(file_path, backup_path)
@@ -411,16 +470,12 @@ def get_export_mime_type(mime_type):
         'application/vnd.google-apps.drawing': 'image/png',
         'application/vnd.google-apps.script': 'application/vnd.google-apps.script+json',
         'application/vnd.google-apps.jam': 'application/pdf',
-        'application/vnd.google-apps.form': 'application/pdf',
-        'application/vnd.google-apps.site': 'text/plain',  # No direct export support
     }
     
-    # Default to PDF for supported types not explicitly listed
+    # Unknown Google Workspace types default to None; supported formats should come
+    # from about.get(exportFormats) when available.
     if mime_type.startswith('application/vnd.google-apps.') and mime_type not in export_formats:
-        # Check if it's a folder or shortcut, which can't be exported
-        if mime_type in ['application/vnd.google-apps.folder', 'application/vnd.google-apps.shortcut']:
-            return None
-        return 'application/pdf'
+        return None
         
     return export_formats.get(mime_type)
 
@@ -446,6 +501,162 @@ def get_extension_from_mime(mime_type):
         'application/octet-stream': ''  # For unknown binary files
     }
     return google_mime_map.get(mime_type, '')
+
+
+def classify_export_error(error):
+    """Classify export/download errors into retryable vs manual-required categories."""
+    message = str(error)
+    lower = message.lower()
+    status = getattr(getattr(error, 'resp', None), 'status', None)
+
+    if 'exportsizelimitexceeded' in lower:
+        return 'export_size_limit'
+    if status == 403 and 'exportsizelimitexceeded' in lower:
+        return 'export_size_limit'
+    if 'too large to be exported' in lower:
+        return 'export_size_limit'
+    if status == 400 and 'requested conversion is not supported' in lower:
+        return 'unsupported_export'
+    if 'requested conversion is not supported' in lower:
+        return 'unsupported_export'
+    return None
+
+
+def mark_manual_download_required(file_metadata, reason_code, error):
+    """Mark a file as requiring manual download and persist reason/error metadata."""
+    if not isinstance(file_metadata, dict):
+        return
+
+    reason_map = {
+        'export_size_limit': 'Drive API export size limit (10 MB)',
+        'unsupported_export': 'No supported API export format for this file type',
+        'forms_api_permission_denied': 'Forms API permission denied (check API enablement/scopes/access)',
+        'forms_api_not_enabled': 'Forms API not enabled in the Google Cloud project',
+    }
+    reason_text = reason_map.get(reason_code, 'Manual download required')
+    file_metadata['manual_download_required'] = True
+    file_metadata['manual_download_reason'] = reason_text
+    file_metadata['last_error_code'] = reason_code or 'manual_required'
+    file_metadata['last_error_at'] = utc_now_iso_z()
+    file_metadata['error'] = str(error)
+
+
+def clear_error_markers(file_metadata):
+    """Clear stale error/manual markers after successful download."""
+    if not isinstance(file_metadata, dict):
+        return
+    for key in (
+        'error',
+        'last_error_code',
+        'last_error_at',
+        'manual_download_required',
+        'manual_download_reason',
+        'skipped_api_limit',
+    ):
+        if key in file_metadata:
+            file_metadata.pop(key, None)
+
+
+def has_missing_local_copy(file_metadata):
+    """Return True when a file has a recorded local path that is no longer present."""
+    if not isinstance(file_metadata, dict):
+        return False
+    mime_type = file_metadata.get('mime_type', '')
+    if mime_type in ('application/vnd.google-apps.folder', 'application/vnd.google-apps.shortcut'):
+        return False
+
+    local_path = file_metadata.get('local_path')
+    if not local_path:
+        return False
+    return not os.path.exists(strip_unc_prefix(local_path))
+
+
+def generate_unresolved_files_report(metadata, report_dir, timestamp):
+    """
+    Generate a CSV report of unresolved backup entries (errors or manual-required).
+    Returns a dictionary with counts and report path.
+    """
+    os.makedirs(report_dir, exist_ok=True)
+    report_path = os.path.join(report_dir, f'unresolved_files_{timestamp}.csv')
+
+    total = 0
+    missing_local = 0
+    manual_required = 0
+    with_local_copy = 0
+
+    headers = [
+        'file_id',
+        'name',
+        'mime_type',
+        'modified_time',
+        'local_path',
+        'local_exists',
+        'manual_download_required',
+        'manual_download_reason',
+        'last_error_code',
+        'error',
+    ]
+
+    with open(report_path, 'w', encoding='utf-8', newline='') as f:
+        writer = csv.DictWriter(f, fieldnames=headers)
+        writer.writeheader()
+
+        for file_id, file_data in metadata.items():
+            if not isinstance(file_data, dict):
+                continue
+            if file_data.get('removed'):
+                continue
+
+            has_issue = (
+                bool(file_data.get('error'))
+                or bool(file_data.get('manual_download_required'))
+                or has_missing_local_copy(file_data)
+            )
+            if not has_issue:
+                continue
+
+            local_path = file_data.get('local_path')
+            plain_local_path = strip_unc_prefix(local_path) if local_path else ''
+            local_exists = bool(plain_local_path and os.path.exists(plain_local_path))
+            inferred_code = classify_export_error(file_data.get('error'))
+            inferred_manual_required = inferred_code in ('export_size_limit', 'unsupported_export')
+            manual_required_flag = bool(file_data.get('manual_download_required')) or inferred_manual_required
+            manual_reason = file_data.get('manual_download_reason', '')
+            if not manual_reason and inferred_code == 'export_size_limit':
+                manual_reason = 'Drive API export size limit (10 MB)'
+            if not manual_reason and inferred_code == 'unsupported_export':
+                manual_reason = 'No supported API export format for this file type'
+
+            total += 1
+            if local_exists:
+                with_local_copy += 1
+            else:
+                missing_local += 1
+            if manual_required_flag:
+                manual_required += 1
+
+            writer.writerow(
+                {
+                    'file_id': file_id,
+                    'name': file_data.get('name', ''),
+                    'mime_type': file_data.get('mime_type', ''),
+                    'modified_time': file_data.get('modified_time', ''),
+                    'local_path': plain_local_path,
+                    'local_exists': local_exists,
+                    'manual_download_required': manual_required_flag,
+                    'manual_download_reason': manual_reason,
+                    'last_error_code': file_data.get('last_error_code', inferred_code or ''),
+                    'error': file_data.get('error', ''),
+                }
+            )
+
+    return {
+        'report_path': report_path,
+        'total': total,
+        'missing_local': missing_local,
+        'manual_required': manual_required,
+        'with_local_copy': with_local_copy,
+    }
 
 @retry_with_backoff(max_retries=3)
 def download_file(drive_service, file_id, local_path, mime_type, file_metadata):
@@ -833,6 +1044,11 @@ def strip_unc_prefix(path):
         return path[4:]
     return path
 
+
+def utc_now_iso_z():
+    """Return a timezone-aware UTC timestamp in ISO format with a trailing Z."""
+    return datetime.datetime.now(datetime.timezone.utc).isoformat().replace('+00:00', 'Z')
+
 def get_effective_local_path(file_metadata, requested_local_path):
     """
     Prefer the path written by the downloader (e.g., exported Google Docs extension),
@@ -942,10 +1158,20 @@ def get_default_config():
         'mirror_root_path': 'backups',
         'report_dir': 'reports',
         'log_dir': 'logs',
+        'tokens_root_dir': 'tokens',
+        'token_profile': 'default',
+        'log_level': 'INFO',
         'include_shared_items': False,
         'calculate_drive_totals_before_backup': False,
         'use_changes_api_on_update': True,
-        'changes_page_size': 1000
+        'changes_page_size': 1000,
+        'metadata_save_every_items': 500,
+        'metadata_save_min_seconds': 300,
+        'retry_unresolved_missing_files': True,
+        'max_unresolved_retries_per_run': 200,
+        'retry_manual_required_files': False,
+        'generate_unresolved_report': True,
+        'enable_forms_api_backup': True
     }
 
 def parse_arguments():
@@ -981,7 +1207,7 @@ def parse_arguments():
     
     return parser.parse_args()
 
-def setup_logging(log_file):
+def setup_logging(log_file, log_level='INFO'):
     """
     Set up logging configuration.
     
@@ -993,8 +1219,10 @@ def setup_logging(log_file):
     os.makedirs(logs_directory, exist_ok=True)
     
     # Get the root logger instance
-    logger = logging.getLogger()  # Get the root logger instance
-    logger.setLevel(logging.DEBUG)  # Changed from INFO to DEBUG for debugging
+    logger = logging.getLogger()
+    normalized_level = str(log_level).upper()
+    numeric_level = getattr(logging, normalized_level, logging.INFO)
+    logger.setLevel(numeric_level)
     
     # Clear existing handlers (optional, but good practice to ensure clean setup)
     if logger.hasHandlers():
@@ -1007,7 +1235,7 @@ def setup_logging(log_file):
     # Create and Configure File Handler
     try:
         file_handler = logging.FileHandler(log_file, encoding='utf-8')
-        file_handler.setLevel(logging.DEBUG)  # Changed from INFO to DEBUG for debugging
+        file_handler.setLevel(numeric_level)
         file_handler.setFormatter(formatter)
         logger.addHandler(file_handler)  # Add handler to the logger
     except Exception as e:
@@ -1016,12 +1244,75 @@ def setup_logging(log_file):
     
     # Create and Configure Console Handler
     stream_handler = logging.StreamHandler()
-    stream_handler.setLevel(logging.DEBUG)  # Changed from INFO to DEBUG for debugging
+    stream_handler.setLevel(numeric_level)
     stream_handler.setFormatter(formatter)
     logger.addHandler(stream_handler)  # Add handler to the logger
     
     logger.info("==== Starting backup session ====")
-    logger.debug("Debug logging enabled for troubleshooting")  # Confirm debug logging is active
+    logger.debug("Debug logging enabled for troubleshooting")
+
+def resolve_auth_paths(config, token_profile=None, credentials_file=None, token_file=None, tokens_root_dir=None):
+    """
+    Resolve auth file paths for profile-based token management.
+
+    Priority:
+    1) Explicit CLI paths (`credentials_file`, `token_file`)
+    2) Profile directory paths (`tokens/<profile>/...`)
+    3) Root-level fallback credentials (`credentials.json` then `client_secret.json`)
+    """
+    cfg = config if isinstance(config, dict) else {}
+
+    profile = token_profile or cfg.get('token_profile', 'default')
+    profile = str(profile).strip() if profile is not None else 'default'
+    if not profile:
+        profile = 'default'
+
+    if not re.fullmatch(r'[A-Za-z0-9._-]+', profile):
+        raise ValueError("Invalid token profile name. Use only letters, numbers, dot, underscore, and hyphen.")
+
+    resolved_tokens_root = tokens_root_dir or cfg.get('tokens_root_dir', 'tokens')
+    if not os.path.isabs(resolved_tokens_root):
+        resolved_tokens_root = os.path.join(script_dir, resolved_tokens_root)
+    resolved_tokens_root = strip_unc_prefix(ensure_long_path_support(resolved_tokens_root))
+
+    profile_dir = os.path.join(resolved_tokens_root, profile)
+    os.makedirs(profile_dir, exist_ok=True)
+
+    if token_file:
+        resolved_token_file = token_file
+        if not os.path.isabs(resolved_token_file):
+            resolved_token_file = os.path.join(script_dir, resolved_token_file)
+    else:
+        resolved_token_file = os.path.join(profile_dir, 'token.pickle')
+
+    if credentials_file:
+        resolved_credentials_file = credentials_file
+        if not os.path.isabs(resolved_credentials_file):
+            resolved_credentials_file = os.path.join(script_dir, resolved_credentials_file)
+    else:
+        profile_credentials = os.path.join(profile_dir, 'credentials.json')
+        root_credentials = os.path.join(script_dir, 'credentials.json')
+        root_client_secret = os.path.join(script_dir, 'client_secret.json')
+        if os.path.exists(profile_credentials):
+            resolved_credentials_file = profile_credentials
+        elif os.path.exists(root_credentials):
+            resolved_credentials_file = root_credentials
+        elif os.path.exists(root_client_secret):
+            resolved_credentials_file = root_client_secret
+        else:
+            raise FileNotFoundError(
+                "No OAuth credentials file found. Expected one of: "
+                f"{profile_credentials}, {root_credentials}, {root_client_secret}"
+            )
+
+    return {
+        'profile': profile,
+        'tokens_root_dir': resolved_tokens_root,
+        'profile_dir': profile_dir,
+        'credentials_file': strip_unc_prefix(ensure_long_path_support(resolved_credentials_file)),
+        'token_file': strip_unc_prefix(ensure_long_path_support(resolved_token_file)),
+    }
+
 
 def authenticate(credentials_file, token_file):
     """
@@ -1032,7 +1323,7 @@ def authenticate(credentials_file, token_file):
         token_file: Path to token file
         
     Returns:
-        Authenticated Drive API service
+        OAuth credentials
     """
     creds = None
     
@@ -1053,9 +1344,7 @@ def authenticate(credentials_file, token_file):
         with open(token_file, 'wb') as token:
             pickle.dump(creds, token)
             
-    # Build and return the Drive API service
-    service = build('drive', 'v3', credentials=creds, cache_discovery=False)
-    return service
+    return creds
 
 def authenticate_drive_service():
     """
@@ -1064,10 +1353,31 @@ def authenticate_drive_service():
     Returns:
         Authenticated Drive API service
     """
-    credentials_file = os.path.join(script_dir, 'credentials.json')
-    token_file = os.path.join(script_dir, 'token.pickle')
-    
-    return authenticate(credentials_file, token_file)
+    auth_paths = resolve_auth_paths(config=get_default_config())
+    creds = authenticate(auth_paths['credentials_file'], auth_paths['token_file'])
+    return build('drive', 'v3', credentials=creds, cache_discovery=False)
+
+
+def authenticate_services(enable_forms_service=True, credentials_file=None, token_file=None):
+    """
+    Authenticate and create Drive + optional Forms API services from one credential set.
+    """
+    if not credentials_file or not token_file:
+        auth_paths = resolve_auth_paths(config=get_default_config())
+        credentials_file = credentials_file or auth_paths['credentials_file']
+        token_file = token_file or auth_paths['token_file']
+
+    creds = authenticate(credentials_file, token_file)
+    drive_service = build('drive', 'v3', credentials=creds, cache_discovery=False)
+
+    forms_service = None
+    if enable_forms_service:
+        try:
+            forms_service = build('forms', 'v1', credentials=creds, cache_discovery=False)
+        except Exception as e:
+            logging.getLogger(__name__).warning(f"Forms API service unavailable: {e}")
+
+    return drive_service, forms_service
 
 def get_export_format(mime_type):
     """
@@ -1135,11 +1445,12 @@ def generate_report(report_messages, report_path):
             # List files that need manual download due to API export limits
             if report_messages.get('manual_download_files', []):
                 f.write("\n\n===== FILES REQUIRING MANUAL DOWNLOAD =====\n\n")
-                f.write("The following files could not be exported via the API due to size limitations.\n")
-                f.write("You will need to download these files manually from Google Drive:\n\n")
+                f.write("The following files could not be fully acquired via API automation.\n")
+                f.write("You may need to download these files manually from Google Drive:\n\n")
                 
                 for file_info in report_messages.get('manual_download_files', []):
-                    f.write(f"* {file_info['name']} ({file_info.get('mime_type', 'Unknown type')})\n")
+                    reason = file_info.get('reason', 'Export/download limitation')
+                    f.write(f"* {file_info['name']} ({file_info.get('mime_type', 'Unknown type')}) | reason: {reason} | id: {file_info.get('id', '')}\n")
         
         print(f"Report saved to {report_path}")
         
@@ -1166,9 +1477,15 @@ class DriveBackup:
         mode,
         report_messages,
         include_shared_items=False,
+        forms_service=None,
         sync_state_path=None,
         use_changes_api_on_update=True,
-        changes_page_size=1000
+        changes_page_size=1000,
+        metadata_save_every_items=500,
+        metadata_save_min_seconds=300,
+        retry_unresolved_missing_files=True,
+        max_unresolved_retries_per_run=200,
+        retry_manual_required_files=False
     ):
         """
         Initialize the Drive Backup with the necessary state.
@@ -1181,11 +1498,18 @@ class DriveBackup:
             mode: 'full' or 'update'
             report_messages: Dictionary of message lists for the report
             include_shared_items: Whether to include shared items
+            forms_service: Authenticated Google Forms service (optional)
             sync_state_path: Path to changes API token state file
             use_changes_api_on_update: Whether update mode should try changes.list first
             changes_page_size: changes.list page size
+            metadata_save_every_items: Metadata checkpoint interval in processed items
+            metadata_save_min_seconds: Minimum seconds between metadata checkpoints
+            retry_unresolved_missing_files: Retry missing/error entries after primary sync
+            max_unresolved_retries_per_run: Maximum unresolved entries retried per run
+            retry_manual_required_files: Also retry manual-required entries (usually false)
         """
         self.drive_service = drive_service
+        self.forms_service = forms_service
         self.shared_drive_id = shared_drive_id
         self.target_mirror_path = target_mirror_path
         self.metadata_path = metadata_path
@@ -1195,6 +1519,12 @@ class DriveBackup:
         self.sync_state_path = sync_state_path
         self.use_changes_api_on_update = use_changes_api_on_update
         self.changes_page_size = changes_page_size
+        self.metadata_save_every_items = max(1, int(metadata_save_every_items))
+        self.metadata_save_min_seconds = max(1, int(metadata_save_min_seconds))
+        self.retry_unresolved_missing_files = bool(retry_unresolved_missing_files)
+        self.max_unresolved_retries_per_run = max(0, int(max_unresolved_retries_per_run))
+        self.retry_manual_required_files = bool(retry_manual_required_files)
+        self.export_formats_by_source_mime = None
         self.folder_path_cache = {self.shared_drive_id: ""}
         
         # Setup logging for the instance *before* using it
@@ -1204,9 +1534,10 @@ class DriveBackup:
         # The mode ('full' or 'update') affects download decisions, not which metadata file is loaded.
         self.metadata = load_metadata(self.metadata_path) 
         self.logger.info(f"Loaded metadata from central file: {self.metadata_path}")
+        self.metadata_dirty = False
             
         # Initialize metadata save timer
-        self.next_metadata_save_time = time.time() + 300
+        self.next_metadata_save_time = time.time() + self.metadata_save_min_seconds
         
         # Initialize statistics
         self.total_downloaded = 0
@@ -1214,17 +1545,240 @@ class DriveBackup:
         self.total_errors = 0
         self.total_size = 0
         
-    def save_metadata(self):
+    def save_metadata(self, force=False, create_backup=False):
         """Save the metadata to the specified path with proper error handling."""
         try:
+            if not force and not self.metadata_dirty:
+                return True
             self.logger.info(f"Saving metadata checkpoint to {self.metadata_path}...")
-            save_metadata(self.metadata, self.metadata_path)
+            save_metadata(self.metadata, self.metadata_path, create_backup=create_backup)
             self.logger.info("Metadata checkpoint saved successfully")
-            self.next_metadata_save_time = time.time() + 300  # Reset timer after successful save
+            self.metadata_dirty = False
+            self.next_metadata_save_time = time.time() + self.metadata_save_min_seconds  # Reset timer after successful save
             return True
         except Exception as e:
             self.logger.error(f"Failed to save metadata checkpoint: {e}", exc_info=True)
             return False
+
+    def maybe_checkpoint_metadata(self, items_processed):
+        """Persist metadata periodically based on time or item-count thresholds."""
+        current_time = time.time()
+        time_expired = current_time > self.next_metadata_save_time
+        count_threshold_reached = (items_processed % self.metadata_save_every_items == 0)
+
+        if time_expired or count_threshold_reached:
+            return self.save_metadata()
+        return False
+
+    def _load_export_formats(self):
+        """Load system-supported export formats for this authenticated user."""
+        if self.export_formats_by_source_mime is not None:
+            return self.export_formats_by_source_mime
+        try:
+            response = self.drive_service.about().get(fields='exportFormats').execute()
+            export_formats = response.get('exportFormats', {})
+            if isinstance(export_formats, dict):
+                self.export_formats_by_source_mime = export_formats
+            else:
+                self.export_formats_by_source_mime = {}
+        except Exception as e:
+            self.logger.warning(f"Could not load exportFormats from about.get: {e}")
+            self.export_formats_by_source_mime = {}
+        return self.export_formats_by_source_mime
+
+    def _choose_export_mime_for_file(self, source_mime):
+        """
+        Choose the best export MIME for a Google Workspace file, preferring
+        user-supported formats from about.get(exportFormats).
+        """
+        supported = self._load_export_formats().get(source_mime, [])
+        if not isinstance(supported, list):
+            supported = []
+        preferred = PREFERRED_EXPORT_MIMES.get(source_mime, [])
+        for mime in preferred:
+            if mime in supported:
+                return mime
+        if supported:
+            return supported[0]
+
+        fallback = get_export_mime_type(source_mime)
+        return fallback
+
+    def backup_form_via_forms_api(self, form_id, local_path_base, file_metadata):
+        """
+        Backup a Google Form definition + responses as JSON using Forms API.
+        Returns 'downloaded' on success, otherwise 'error'.
+        """
+        if not self.forms_service:
+            file_metadata['error'] = 'Forms API service unavailable'
+            file_metadata['last_error_code'] = 'forms_api_unavailable'
+            file_metadata['last_error_at'] = utc_now_iso_z()
+            return 'error'
+
+        try:
+            form_payload = self.forms_service.forms().get(formId=form_id).execute()
+            responses = []
+            page_token = None
+
+            while True:
+                params = {'formId': form_id, 'pageSize': 500}
+                if page_token:
+                    params['pageToken'] = page_token
+                response_page = self.forms_service.forms().responses().list(**params).execute()
+                responses.extend(response_page.get('responses', []))
+                page_token = response_page.get('nextPageToken')
+                if not page_token:
+                    break
+
+            os.makedirs(os.path.dirname(local_path_base), exist_ok=True)
+            forms_json_path = f"{local_path_base}.form.json"
+            with open(forms_json_path, 'w', encoding='utf-8') as f:
+                json.dump(
+                    {
+                        'backup_type': 'google_form_api',
+                        'backed_up_at': utc_now_iso_z(),
+                        'form': form_payload,
+                        'responses': responses,
+                    },
+                    f,
+                    ensure_ascii=False,
+                    indent=2
+                )
+
+            file_metadata['local_path'] = forms_json_path
+            file_metadata['export_mime'] = 'application/json'
+            file_metadata['backup_type'] = 'forms_api'
+            file_metadata['responses_count'] = len(responses)
+            clear_error_markers(file_metadata)
+            return 'downloaded'
+        except Exception as e:
+            error_text = str(e)
+            file_metadata['error'] = error_text
+            lower_error = error_text.lower()
+            if 'has not been used in project' in lower_error or 'api has not been used' in lower_error or 'it is disabled' in lower_error:
+                file_metadata['last_error_code'] = 'forms_api_not_enabled'
+            elif (
+                'PERMISSION_DENIED' in error_text
+                or 'permission' in lower_error
+                or 'insufficient authentication scopes' in lower_error
+                or 'access_token_scope_insufficient' in lower_error
+            ):
+                file_metadata['last_error_code'] = 'forms_api_permission_denied'
+            else:
+                file_metadata['last_error_code'] = 'forms_api_backup_failed'
+            file_metadata['last_error_at'] = utc_now_iso_z()
+            return 'error'
+
+    def retry_unresolved_files(self, mirror_folder_path):
+        """Retry missing/error files using targeted file lookups and downloads."""
+        if self.max_unresolved_retries_per_run <= 0:
+            return {'attempted': 0, 'downloaded': 0, 'skipped': 0, 'errors': 0}
+
+        candidates = []
+        for file_id, file_data in self.metadata.items():
+            if not isinstance(file_data, dict):
+                continue
+            if file_data.get('removed'):
+                continue
+
+            missing_local_copy = has_missing_local_copy(file_data)
+            has_issue = (
+                bool(file_data.get('error'))
+                or bool(file_data.get('manual_download_required'))
+                or missing_local_copy
+            )
+            if not has_issue:
+                continue
+
+            inferred_code = classify_export_error(file_data.get('error'))
+            inferred_manual_required = inferred_code in ('export_size_limit', 'unsupported_export')
+            is_google_form = file_data.get('mime_type') == 'application/vnd.google-apps.form'
+            forms_blocking_error = file_data.get('last_error_code') in ('forms_api_permission_denied', 'forms_api_not_enabled')
+            allow_forms_api_retry = is_google_form and self.forms_service is not None and not forms_blocking_error
+            if (
+                (file_data.get('manual_download_required') or inferred_manual_required)
+                and not self.retry_manual_required_files
+                and not allow_forms_api_retry
+            ):
+                continue
+
+            local_path = file_data.get('local_path')
+            if local_path and os.path.exists(strip_unc_prefix(local_path)):
+                continue
+
+            candidates.append(file_id)
+
+        if not candidates:
+            return {'attempted': 0, 'downloaded': 0, 'skipped': 0, 'errors': 0}
+
+        attempted = 0
+        downloaded = 0
+        skipped = 0
+        errors = 0
+        total_size = 0
+
+        for file_id in candidates[: self.max_unresolved_retries_per_run]:
+            attempted += 1
+            try:
+                file_item = self.drive_service.files().get(
+                    fileId=file_id,
+                    fields='id,name,mimeType,modifiedTime,md5Checksum,size,parents,trashed',
+                    supportsAllDrives=True
+                ).execute()
+            except Exception as e:
+                is_not_found = False
+                status = getattr(getattr(e, 'resp', None), 'status', None)
+                if status == 404:
+                    is_not_found = True
+                elif 'not found' in str(e).lower():
+                    is_not_found = True
+
+                if file_id in self.metadata:
+                    if is_not_found:
+                        # The file is no longer accessible via API; treat as removed
+                        # so unresolved reports don't keep retrying stale IDs forever.
+                        self.metadata[file_id]['removed'] = True
+                        self.metadata[file_id]['removed_time'] = utc_now_iso_z()
+                        clear_error_markers(self.metadata[file_id])
+                        skipped += 1
+                    else:
+                        errors += 1
+                        self.metadata[file_id]['error'] = str(e)
+                        self.metadata[file_id]['last_error_code'] = 'file_lookup_failed'
+                        self.metadata[file_id]['last_error_at'] = utc_now_iso_z()
+                    self.metadata_dirty = True
+                else:
+                    if not is_not_found:
+                        errors += 1
+                continue
+
+            if not isinstance(file_item, dict) or file_item.get('trashed'):
+                skipped += 1
+                if file_id in self.metadata:
+                    self.metadata[file_id]['removed'] = True
+                    self.metadata[file_id]['removed_time'] = utc_now_iso_z()
+                    self.metadata_dirty = True
+                continue
+
+            result = self._process_changed_file_item(file_item, mirror_folder_path, prefix='[retry] ')
+            downloaded += result.get('downloaded', 0)
+            skipped += result.get('skipped', 0)
+            errors += result.get('errors', 0)
+            total_size += result.get('total_size', 0)
+            self.maybe_checkpoint_metadata(attempted)
+
+        self.total_downloaded += downloaded
+        self.total_skipped += skipped
+        self.total_errors += errors
+        self.total_size += total_size
+
+        return {
+            'attempted': attempted,
+            'downloaded': downloaded,
+            'skipped': skipped,
+            'errors': errors,
+            'total_size': total_size,
+        }
     
     def download_file(self, file_id, local_path, mime_type, file_metadata):
         """
@@ -1236,31 +1790,95 @@ class DriveBackup:
             
             # Check if this is a Google Workspace file that needs exporting
             if mime_type.startswith('application/vnd.google-apps.'):
-                export_mime = get_export_mime_type(mime_type)
-                
-                if not export_mime:
-                    self.logger.info(f"Skipping folder or unsupported Google type: {os.path.basename(local_path)}")
-                    return 'skipped'
-                
-                # Add the appropriate extension for exported files
-                if mime_type in GOOGLE_MIME_EXPORT_MAP:
-                    ext = GOOGLE_MIME_EXPORT_MAP[mime_type]['ext']
-                    if not local_path.lower().endswith(f".{ext.lower()}"):
-                        local_path = f"{local_path}.{ext}"
-                
-                # Try to export the file
-                try:
-                    request = self.drive_service.files().export_media(fileId=file_id, mimeType=export_mime)
-                except HttpError as e:
-                    if e.resp.status == 403 and "exportSizeLimitExceeded" in str(e):
-                        file_metadata['error'] = f"Export size limit: {str(e)}"
-                        return 'skipped_api_limit'
-                    else:
+                if mime_type == 'application/vnd.google-apps.form':
+                    forms_result = self.backup_form_via_forms_api(file_id, local_path, file_metadata)
+                    if forms_result == 'downloaded':
+                        return 'downloaded'
+                    reason = file_metadata.get('error', 'No supported export format for Google Form')
+                    reason_code = file_metadata.get('last_error_code')
+                    if reason_code not in ('forms_api_permission_denied', 'forms_api_not_enabled'):
+                        reason_code = 'unsupported_export'
+                    mark_manual_download_required(file_metadata, reason_code, reason)
+                    return 'skipped_manual_required'
+
+                supported_formats = self._load_export_formats().get(mime_type, [])
+                if not isinstance(supported_formats, list):
+                    supported_formats = []
+
+                candidate_export_mimes = []
+                for preferred in PREFERRED_EXPORT_MIMES.get(mime_type, []):
+                    if preferred in supported_formats and preferred not in candidate_export_mimes:
+                        candidate_export_mimes.append(preferred)
+                for supported in supported_formats:
+                    if supported not in candidate_export_mimes:
+                        candidate_export_mimes.append(supported)
+
+                fallback_export_mime = get_export_mime_type(mime_type)
+                if fallback_export_mime and fallback_export_mime not in candidate_export_mimes:
+                    candidate_export_mimes.append(fallback_export_mime)
+
+                if not candidate_export_mimes:
+                    reason = f"No supported export format for {mime_type}"
+                    mark_manual_download_required(file_metadata, 'unsupported_export', reason)
+                    self.logger.warning(f"Manual download required: {os.path.basename(local_path)} ({reason})")
+                    return 'skipped_manual_required'
+
+                last_manual_reason_code = None
+                last_manual_error = None
+                last_retryable_error = None
+
+                for export_mime in candidate_export_mimes:
+                    ext = EXPORT_MIME_TO_EXT.get(export_mime)
+                    target_local_path = local_path
+                    if ext and not target_local_path.lower().endswith(f".{ext.lower()}"):
+                        target_local_path = f"{target_local_path}.{ext}"
+
+                    try:
+                        request = self.drive_service.files().export_media(fileId=file_id, mimeType=export_mime)
+                        os.makedirs(os.path.dirname(target_local_path), exist_ok=True)
+
+                        with open(target_local_path, 'wb') as f:
+                            downloader = MediaIoBaseDownload(f, request, chunksize=CHUNK_SIZE)
+                            done = False
+                            while not done:
+                                status, done = downloader.next_chunk()
+
+                        file_metadata['local_path'] = target_local_path
+                        file_metadata['export_mime'] = export_mime
+                        clear_error_markers(file_metadata)
+                        return 'downloaded'
+
+                    except Exception as e:
+                        if os.path.exists(target_local_path):
+                            try:
+                                os.remove(target_local_path)
+                            except Exception:
+                                pass
+
+                        reason_code = classify_export_error(e)
+                        if reason_code in ('export_size_limit', 'unsupported_export'):
+                            last_manual_reason_code = reason_code
+                            last_manual_error = e
+                            continue
+
+                        last_retryable_error = e
                         file_metadata['error'] = str(e)
-                        raise
-                except Exception as e:
-                    file_metadata['error'] = f"Unsupported Google Apps type: {mime_type}"
-                    raise
+                        file_metadata['last_error_code'] = 'export_request_failed'
+                        file_metadata['last_error_at'] = utc_now_iso_z()
+                        break
+
+                if last_manual_reason_code:
+                    mark_manual_download_required(file_metadata, last_manual_reason_code, last_manual_error)
+                    if last_manual_reason_code == 'export_size_limit':
+                        return 'skipped_api_limit'
+                    return 'skipped_manual_required'
+
+                if last_retryable_error:
+                    raise last_retryable_error
+
+                reason = f"No export candidate succeeded for {mime_type}"
+                mark_manual_download_required(file_metadata, 'unsupported_export', reason)
+                return 'skipped_manual_required'
                     
             else:
                 # For regular files, download directly
@@ -1268,6 +1886,8 @@ class DriveBackup:
                     request = self.drive_service.files().get_media(fileId=file_id)
                 except Exception as e:
                     file_metadata['error'] = str(e)
+                    file_metadata['last_error_code'] = 'download_request_failed'
+                    file_metadata['last_error_at'] = utc_now_iso_z()
                     raise
             
             # Create directories if they don't exist
@@ -1281,18 +1901,27 @@ class DriveBackup:
                     try:
                         status, done = downloader.next_chunk()
                     except Exception as e:
+                        reason_code = classify_export_error(e) if export_mime else None
+                        if reason_code in ('export_size_limit', 'unsupported_export'):
+                            mark_manual_download_required(file_metadata, reason_code, e)
+                            return 'skipped_api_limit'
                         file_metadata['error'] = str(e)
+                        file_metadata['last_error_code'] = 'download_chunk_failed'
+                        file_metadata['last_error_at'] = utc_now_iso_z()
                         raise
             
             # Update metadata
             file_metadata['local_path'] = local_path
             file_metadata['export_mime'] = export_mime
+            clear_error_markers(file_metadata)
             
             return 'downloaded'
             
         except Exception as e:
             self.logger.error(f"Error downloading: {os.path.basename(local_path)} - {str(e)}")
             file_metadata['error'] = str(e)
+            file_metadata['last_error_code'] = file_metadata.get('last_error_code', 'download_failed')
+            file_metadata['last_error_at'] = utc_now_iso_z()
             return 'error'
 
     def _save_latest_start_page_token(self):
@@ -1309,7 +1938,7 @@ class DriveBackup:
                 return
             state = load_sync_state(self.sync_state_path)
             state['last_start_page_token'] = new_token
-            state['updated_at'] = datetime.datetime.utcnow().isoformat() + 'Z'
+            state['updated_at'] = utc_now_iso_z()
             save_sync_state(state, self.sync_state_path)
         except Exception as e:
             self.logger.warning(f"Failed to refresh changes start token: {e}")
@@ -1385,45 +2014,91 @@ class DriveBackup:
             resolved_old_local_path = resolve_existing_local_path(old_local_path, self.target_mirror_path)
             if resolved_old_local_path != old_local_path:
                 self.metadata[file_id]['local_path'] = resolved_old_local_path
+                self.metadata_dirty = True
                 old_local_path = resolved_old_local_path
 
             old_modified_time = existing_metadata.get('modified_time')
+            allow_forms_api_retry = (
+                mime_type == 'application/vnd.google-apps.form'
+                and self.forms_service is not None
+                and prefix.startswith('[retry]')
+            )
+            if (
+                existing_metadata.get('manual_download_required')
+                and old_modified_time == drive_modified_time
+                and not self.retry_manual_required_files
+                and not allow_forms_api_retry
+            ):
+                download_needed = False
+                skipped_count += 1
+                self.logger.debug(f"{prefix}Skipping manual-required file unchanged since last attempt: {file_name}")
+
             if old_local_path and os.path.exists(old_local_path) and old_modified_time == drive_modified_time:
                 download_needed = False
                 skipped_count += 1
                 self.logger.debug(f"{prefix}Skipping up-to-date changed file: {file_name}")
-                self.metadata[file_id]['local_path'] = local_path
-                self.metadata[file_id]['name'] = file_name
-                self.metadata[file_id]['mime_type'] = mime_type
+                if self.metadata[file_id].get('local_path') != local_path:
+                    self.metadata[file_id]['local_path'] = local_path
+                    self.metadata_dirty = True
+                if self.metadata[file_id].get('name') != file_name:
+                    self.metadata[file_id]['name'] = file_name
+                    self.metadata_dirty = True
+                if self.metadata[file_id].get('mime_type') != mime_type:
+                    self.metadata[file_id]['mime_type'] = mime_type
+                    self.metadata_dirty = True
 
         if download_needed:
             if file_id not in self.metadata:
                 self.metadata[file_id] = {}
+                self.metadata_dirty = True
 
-            self.metadata[file_id]['name'] = file_name
-            self.metadata[file_id]['mime_type'] = mime_type
-            self.metadata[file_id]['modified_time'] = drive_modified_time
-            if drive_md5:
+            if self.metadata[file_id].get('name') != file_name:
+                self.metadata[file_id]['name'] = file_name
+                self.metadata_dirty = True
+            if self.metadata[file_id].get('mime_type') != mime_type:
+                self.metadata[file_id]['mime_type'] = mime_type
+                self.metadata_dirty = True
+            if self.metadata[file_id].get('modified_time') != drive_modified_time:
+                self.metadata[file_id]['modified_time'] = drive_modified_time
+                self.metadata_dirty = True
+            if drive_md5 and self.metadata[file_id].get('md5Checksum') != drive_md5:
                 self.metadata[file_id]['md5Checksum'] = drive_md5
+                self.metadata_dirty = True
 
             self.logger.info(f"{prefix}Downloading changed file: {file_name}")
             try:
                 result = self.download_file(file_id, local_path, mime_type, self.metadata[file_id])
                 if result == 'downloaded':
                     download_count += 1
-                    self.metadata[file_id]['local_path'] = get_effective_local_path(self.metadata[file_id], local_path)
+                    effective_local_path = get_effective_local_path(self.metadata[file_id], local_path)
+                    if self.metadata[file_id].get('local_path') != effective_local_path:
+                        self.metadata[file_id]['local_path'] = effective_local_path
+                        self.metadata_dirty = True
                     if 'size' in file_item:
                         size = int(file_item['size'])
-                        self.metadata[file_id]['size'] = size
+                        if self.metadata[file_id].get('size') != size:
+                            self.metadata[file_id]['size'] = size
+                            self.metadata_dirty = True
                         total_size += size
                 elif result == 'skipped_api_limit':
                     skipped_count += 1
-                    self.metadata[file_id]['skipped_api_limit'] = True
+                    if self.metadata[file_id].get('skipped_api_limit') is not True:
+                        self.metadata[file_id]['skipped_api_limit'] = True
+                        self.metadata_dirty = True
+                elif result == 'skipped_manual_required':
+                    skipped_count += 1
+                    self.metadata_dirty = True
                 else:
                     error_count += 1
+                    error_text = self.metadata[file_id].get('error', 'Unknown download error')
+                    self.report_messages['errors'].append(f"Error downloading changed file {file_name}: {error_text}")
+                    self.metadata_dirty = True
             except Exception as e:
                 error_count += 1
-                self.metadata[file_id]['error'] = str(e)
+                error_text = str(e)
+                if self.metadata[file_id].get('error') != error_text:
+                    self.metadata[file_id]['error'] = error_text
+                    self.metadata_dirty = True
                 self.logger.error(f"{prefix}Error downloading changed file {file_name}: {e}")
                 self.report_messages['errors'].append(f"Error downloading changed file {file_name}: {e}")
 
@@ -1488,7 +2163,8 @@ class DriveBackup:
                     file_id = change.get('fileId')
                     if file_id and file_id in self.metadata:
                         self.metadata[file_id]['removed'] = True
-                        self.metadata[file_id]['removed_time'] = datetime.datetime.utcnow().isoformat() + 'Z'
+                        self.metadata[file_id]['removed_time'] = utc_now_iso_z()
+                        self.metadata_dirty = True
                     skipped_count += 1
                     continue
 
@@ -1507,11 +2183,7 @@ class DriveBackup:
                 total_size += result.get('total_size', 0)
 
                 # Periodic metadata save in changes mode
-                current_time = time.time()
-                time_expired = current_time > self.next_metadata_save_time
-                count_threshold_reached = (processed_count % 50 == 0)
-                if time_expired or count_threshold_reached:
-                    self.save_metadata()
+                self.maybe_checkpoint_metadata(processed_count)
 
             next_page_token = response.get('nextPageToken')
             if next_page_token:
@@ -1521,7 +2193,7 @@ class DriveBackup:
             new_start_page_token = response.get('newStartPageToken')
             if new_start_page_token:
                 sync_state['last_start_page_token'] = new_start_page_token
-                sync_state['updated_at'] = datetime.datetime.utcnow().isoformat() + 'Z'
+                sync_state['updated_at'] = utc_now_iso_z()
                 save_sync_state(sync_state, self.sync_state_path)
             else:
                 self._save_latest_start_page_token()
@@ -1671,9 +2343,18 @@ class DriveBackup:
                             resolved_old_local_path = resolve_existing_local_path(old_local_path, self.target_mirror_path)
                             if resolved_old_local_path != old_local_path:
                                 self.metadata[file_id]['local_path'] = resolved_old_local_path
+                                self.metadata_dirty = True
                                 old_local_path = resolved_old_local_path
 
                             old_modified_time = existing_metadata.get('modified_time')
+                            if (
+                                existing_metadata.get('manual_download_required')
+                                and old_modified_time == drive_modified_time
+                                and not self.retry_manual_required_files
+                            ):
+                                download_needed = False
+                                skipped_count += 1
+                                self.logger.debug(f"{prefix}Skipping manual-required file unchanged since last attempt: {file_name}")
 
                             # Check if file exists locally AND modified time matches Drive's current time
                             if old_local_path and os.path.exists(old_local_path) and old_modified_time == drive_modified_time:
@@ -1682,9 +2363,15 @@ class DriveBackup:
                                 self.logger.debug(f"{prefix}Skipping up-to-date file: {file_name}") # DEBUG level
 
                                 # Update metadata ONLY for path/name changes, preserve old mod time/checksum if skipped
-                                self.metadata[file_id]['local_path'] = local_path 
-                                self.metadata[file_id]['name'] = file_name
-                                self.metadata[file_id]['mime_type'] = mime_type
+                                if self.metadata[file_id].get('local_path') != local_path:
+                                    self.metadata[file_id]['local_path'] = local_path
+                                    self.metadata_dirty = True
+                                if self.metadata[file_id].get('name') != file_name:
+                                    self.metadata[file_id]['name'] = file_name
+                                    self.metadata_dirty = True
+                                if self.metadata[file_id].get('mime_type') != mime_type:
+                                    self.metadata[file_id]['mime_type'] = mime_type
+                                    self.metadata_dirty = True
                                 # Keep old modified_time and md5Checksum in metadata when skipping
                             else:
                                 # File needs download (either missing locally or modifiedTime differs)
@@ -1696,12 +2383,20 @@ class DriveBackup:
                              # Ensure entry exists if new
                             if file_id not in self.metadata:
                                  self.metadata[file_id] = {}
+                                 self.metadata_dirty = True
                             # Store the latest info from Drive
-                            self.metadata[file_id]['name'] = file_name
-                            self.metadata[file_id]['mime_type'] = mime_type
-                            self.metadata[file_id]['modified_time'] = drive_modified_time 
-                            if drive_md5: # Store checksum if available
+                            if self.metadata[file_id].get('name') != file_name:
+                                self.metadata[file_id]['name'] = file_name
+                                self.metadata_dirty = True
+                            if self.metadata[file_id].get('mime_type') != mime_type:
+                                self.metadata[file_id]['mime_type'] = mime_type
+                                self.metadata_dirty = True
+                            if self.metadata[file_id].get('modified_time') != drive_modified_time:
+                                self.metadata[file_id]['modified_time'] = drive_modified_time
+                                self.metadata_dirty = True
+                            if drive_md5 and self.metadata[file_id].get('md5Checksum') != drive_md5: # Store checksum if available
                                 self.metadata[file_id]['md5Checksum'] = drive_md5
+                                self.metadata_dirty = True
                             # local_path will be updated *after* successful download
 
                         # Download if needed
@@ -1719,15 +2414,17 @@ class DriveBackup:
                                 if result == 'downloaded':
                                     download_count += 1
                                     # Update metadata
-                                    self.metadata[file_id]['local_path'] = get_effective_local_path(
-                                        self.metadata[file_id],
-                                        local_path
-                                    )
+                                    effective_local_path = get_effective_local_path(self.metadata[file_id], local_path)
+                                    if self.metadata[file_id].get('local_path') != effective_local_path:
+                                        self.metadata[file_id]['local_path'] = effective_local_path
+                                        self.metadata_dirty = True
                                     
                                     # Update size information
                                     if 'size' in file_item:
                                         size = int(file_item['size'])
-                                        self.metadata[file_id]['size'] = size
+                                        if self.metadata[file_id].get('size') != size:
+                                            self.metadata[file_id]['size'] = size
+                                            self.metadata_dirty = True
                                         total_size += size
                                     
                                     # Log success
@@ -1736,26 +2433,37 @@ class DriveBackup:
                                 elif result == 'skipped_api_limit':
                                     # File too large for API export
                                     skipped_count += 1
-                                    self.metadata[file_id]['skipped_api_limit'] = True
+                                    if self.metadata[file_id].get('skipped_api_limit') is not True:
+                                        self.metadata[file_id]['skipped_api_limit'] = True
+                                        self.metadata_dirty = True
                                     self.logger.warning(f"{prefix}API Export Size Limit: {file_name}")
                                     self.report_messages['errors'].append(f"API Export Size Limit: {file_name}")
+                                elif result == 'skipped_manual_required':
+                                    skipped_count += 1
+                                    self.metadata_dirty = True
+                                    reason = self.metadata[file_id].get('manual_download_reason', 'Manual download required')
+                                    self.logger.warning(f"{prefix}{reason}: {file_name}")
+                                    self.report_messages['errors'].append(f"{reason}: {file_name}")
+                                else:
+                                    error_count += 1
+                                    error_text = self.metadata[file_id].get('error', 'Unknown download error')
+                                    error_msg = f"Error downloading {file_name}: {error_text}"
+                                    self.logger.error(f"{prefix}{error_msg}")
+                                    self.report_messages['errors'].append(error_msg)
                             
                             except Exception as e:
                                 # Record error
                                 error_count += 1
-                                self.metadata[file_id]['error'] = str(e)
+                                error_text = str(e)
+                                if self.metadata[file_id].get('error') != error_text:
+                                    self.metadata[file_id]['error'] = error_text
+                                    self.metadata_dirty = True
                                 error_msg = f"Error downloading {file_name}: {str(e)}"
                                 self.logger.error(f"{prefix}{error_msg}")
                                 self.report_messages['errors'].append(error_msg)
                     
-                    # Check for periodic metadata save (every 50 items or every 5 minutes)
-                    current_time = time.time()
-                    time_expired = current_time > self.next_metadata_save_time
-                    count_threshold_reached = (items_processed % 50 == 0)
-                    
-                    if time_expired or count_threshold_reached:
-                        self.logger.debug(f"Periodic save check: time_expired={time_expired}, count_threshold_reached={count_threshold_reached}")
-                        self.save_metadata()
+                    # Check for periodic metadata save based on configured thresholds
+                    self.maybe_checkpoint_metadata(items_processed)
                 
                 # Get the next page token
                 page_token = response.get('nextPageToken')
@@ -1837,9 +2545,20 @@ class DriveBackup:
                 level=0,
                 prefix=""
             )
+
+        if self.retry_unresolved_missing_files:
+            retry_stats = self.retry_unresolved_files(mirror_folder_path)
+            if retry_stats['attempted'] > 0:
+                self.report_messages['summary'].append(
+                    "Unresolved Retry: "
+                    + f"attempted={retry_stats['attempted']}, "
+                    + f"downloaded={retry_stats['downloaded']}, "
+                    + f"skipped={retry_stats['skipped']}, "
+                    + f"errors={retry_stats['errors']}"
+                )
         
         # Final metadata save
-        self.save_metadata()
+        self.save_metadata(force=True, create_backup=True)
         self._save_latest_start_page_token()
         
         # Return combined statistics
@@ -1860,6 +2579,31 @@ def main():
         parser.add_argument('--output-dir', type=str, help='Override the output directory from config')
         parser.add_argument('--report-dir', type=str, help='Override the report directory from config')
         parser.add_argument('--log-dir', type=str, help='Override the log directory from config')
+        parser.add_argument('--token-profile', type=str, help='Token profile name under tokens/<profile>')
+        parser.add_argument('--tokens-root-dir', type=str, help='Root directory containing token profiles')
+        parser.add_argument('--credentials-file', type=str, help='Explicit OAuth client credentials file path')
+        parser.add_argument('--token-file', type=str, help='Explicit token.pickle path')
+        parser.add_argument(
+            '--log-level',
+            type=str,
+            choices=['DEBUG', 'INFO', 'WARNING', 'ERROR', 'CRITICAL'],
+            help='Override log verbosity (default: INFO)'
+        )
+        parser.add_argument(
+            '--max-unresolved-retries',
+            type=int,
+            help='Override max unresolved file retries per run (default from config)'
+        )
+        parser.add_argument(
+            '--retry-manual-required',
+            action='store_true',
+            help='Also retry files marked as manual-required (disabled by default)'
+        )
+        parser.add_argument(
+            '--disable-forms-api-backup',
+            action='store_true',
+            help='Disable Google Forms API backup fallback'
+        )
 
         args = parser.parse_args()
 
@@ -1871,6 +2615,18 @@ def main():
             config['shared_drive_id'] = args.drive_id
         if args.output_dir:
             config['mirror_root_path'] = args.output_dir
+        if args.log_level:
+            config['log_level'] = args.log_level
+        if args.token_profile:
+            config['token_profile'] = args.token_profile
+        if args.tokens_root_dir:
+            config['tokens_root_dir'] = args.tokens_root_dir
+        if args.max_unresolved_retries is not None:
+            config['max_unresolved_retries_per_run'] = args.max_unresolved_retries
+        if args.retry_manual_required:
+            config['retry_manual_required_files'] = True
+        if args.disable_forms_api_backup:
+            config['enable_forms_api_backup'] = False
         
         # Generate timestamp for reports and logs
         timestamp = datetime.datetime.now().strftime('%Y-%m-%d_%H-%M-%S')
@@ -1892,7 +2648,7 @@ def main():
         log_path = os.path.join(log_dir, log_filename)
         
         # Configure logging
-        setup_logging(log_path)
+        setup_logging(log_path, config.get('log_level', 'INFO'))
         
         # --- Interactive Mode Selection --- 
         logger = logging.getLogger(__name__) # Get logger after setup
@@ -1928,26 +2684,49 @@ def main():
         if not config.get('shared_drive_id'):
             logger.error("No shared drive ID specified in config. Cannot proceed.")
             return 1
+
+        # Resolve profile-based auth file paths
+        auth_paths = resolve_auth_paths(
+            config=config,
+            token_profile=args.token_profile,
+            credentials_file=args.credentials_file,
+            token_file=args.token_file,
+            tokens_root_dir=args.tokens_root_dir,
+        )
+        logger.info(
+            "Auth profile resolved: "
+            + f"profile={auth_paths['profile']}, "
+            + f"token_file={auth_paths['token_file']}, "
+            + f"credentials_file={auth_paths['credentials_file']}"
+        )
             
-        # Create and authenticate with the Drive service
-        drive_service = authenticate_drive_service()
+        # Create and authenticate with Drive (+ optional Forms) services
+        drive_service, forms_service = authenticate_services(
+            enable_forms_service=config.get('enable_forms_api_backup', True),
+            credentials_file=auth_paths['credentials_file'],
+            token_file=auth_paths['token_file'],
+        )
         
         # Determine the target mirror directory based on mode
         target_mirror_path = None
         mirror_root_path = config['mirror_root_path']
+        if not os.path.isabs(mirror_root_path):
+            mirror_root_path = os.path.join(script_dir, mirror_root_path)
+        mirror_root_path = ensure_long_path_support(mirror_root_path)
+        os.makedirs(mirror_root_path, exist_ok=True)
         
         if actual_mode == 'full':
             # For full backup, create a new timestamped directory
-            target_mirror_path = create_new_mirror_directory()
+            target_mirror_path = create_new_mirror_directory(mirror_root_path)
             logger.info(f"Mode: Full. Created new mirror directory: {target_mirror_path}")
         else:  # mode == 'update'
             # For update, use the latest mirror directory or create a new one if none exists
-            target_mirror_path = get_latest_mirror_directory()
+            target_mirror_path = get_latest_mirror_directory(mirror_root_path)
             if target_mirror_path:
                 logger.info(f"Mode: Update. Using latest mirror directory: {target_mirror_path}")
             else:
                 # No existing mirror found for update, start a new baseline
-                target_mirror_path = create_new_mirror_directory()
+                target_mirror_path = create_new_mirror_directory(mirror_root_path)
                 # Clarify that this is a baseline run initiated via 'update' mode
                 logger.warning(f"Mode: Update selected, but no previous mirror found. Starting new baseline in: {target_mirror_path}")
                 actual_mode = 'baseline_update' # Use a distinct internal mode name for clarity if needed later
@@ -2006,6 +2785,7 @@ def main():
         # Create the drive backup instance
         backup_instance = DriveBackup(
             drive_service=drive_service,
+            forms_service=forms_service,
             shared_drive_id=config['shared_drive_id'],
             target_mirror_path=target_mirror_path,
             metadata_path=central_metadata_path,
@@ -2014,7 +2794,12 @@ def main():
             include_shared_items=config.get('include_shared_items', False),
             sync_state_path=changes_sync_state_path,
             use_changes_api_on_update=config.get('use_changes_api_on_update', True),
-            changes_page_size=config.get('changes_page_size', 1000)
+            changes_page_size=config.get('changes_page_size', 1000),
+            metadata_save_every_items=config.get('metadata_save_every_items', 500),
+            metadata_save_min_seconds=config.get('metadata_save_min_seconds', 300),
+            retry_unresolved_missing_files=config.get('retry_unresolved_missing_files', True),
+            max_unresolved_retries_per_run=config.get('max_unresolved_retries_per_run', 200),
+            retry_manual_required_files=config.get('retry_manual_required_files', False)
         )
         
         # Run the backup
@@ -2049,16 +2834,40 @@ def main():
             # Identify files requiring manual download
             manual_download_files = []
             for file_id, file_data in backup_instance.metadata.items():
-                if file_data.get('skipped_api_limit') and 'name' in file_data:
+                inferred_code = classify_export_error(file_data.get('error'))
+                inferred_manual_required = inferred_code in ('export_size_limit', 'unsupported_export')
+                if (file_data.get('skipped_api_limit') or file_data.get('manual_download_required') or inferred_manual_required) and 'name' in file_data:
+                    reason = file_data.get('manual_download_reason', '')
+                    if not reason and inferred_code == 'export_size_limit':
+                        reason = 'Drive API export size limit (10 MB)'
+                    if not reason and inferred_code == 'unsupported_export':
+                        reason = 'No supported API export format for this file type'
+                    if not reason:
+                        reason = 'Export/download limitation'
                     manual_download_files.append({
                         'name': file_data['name'],
                         'mime_type': file_data.get('mime_type', 'Unknown type'),
-                        'id': file_id
+                        'id': file_id,
+                        'reason': reason
                     })
             
             if manual_download_files:
                 report_messages['manual_download_files'] = manual_download_files
                 report_messages['summary'].append(f"Files requiring manual download: {len(manual_download_files)}")
+
+            if config.get('generate_unresolved_report', True):
+                unresolved = generate_unresolved_files_report(
+                    backup_instance.metadata,
+                    report_dir=report_dir,
+                    timestamp=timestamp
+                )
+                report_messages['summary'].append(
+                    "Unresolved File Entries: "
+                    + f"{unresolved['total']} "
+                    + f"(missing local: {unresolved['missing_local']}, "
+                    + f"manual-required: {unresolved['manual_required']})"
+                )
+                report_messages['summary'].append(f"Unresolved File Report: {unresolved['report_path']}")
             
             # Generate the report
             generate_report(report_messages, report_path)
@@ -2072,7 +2881,7 @@ def main():
             
             # Try to save metadata even if there was an error
             if backup_instance:
-                backup_instance.save_metadata()
+                backup_instance.save_metadata(force=True, create_backup=True)
             else:
                 logger.error("Backup instance not created, cannot save metadata.")
             

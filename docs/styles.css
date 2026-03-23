@@ -1,18 +1,18 @@
 :root {
-  --bg: #0b1220;
-  --panel: #121a2b;
-  --text: #e7eef9;
-  --muted: #a9b8d0;
-  --accent: #4cc9f0;
-  --accent-2: #f4d35e;
-  --border: #25314a;
+  --bg: #2f3338;
+  --panel: #3a3f45;
+  --text: #f4f5f7;
+  --muted: #c6c9cf;
+  --accent: #9bd1ff;
+  --accent-2: #ffd166;
+  --border: #545b66;
 }
 * { box-sizing: border-box; }
 body {
   margin: 0;
   font-family: "Segoe UI", Tahoma, Geneva, Verdana, sans-serif;
   color: var(--text);
-  background: radial-gradient(1200px 800px at 10% -10%, #1a2948 0%, var(--bg) 45%), var(--bg);
+  background: var(--bg);
   line-height: 1.5;
 }
 .wrap {
@@ -21,7 +21,7 @@ body {
   padding: 24px 18px 48px;
 }
 .hero {
-  background: linear-gradient(135deg, #182642, #101a2f);
+  background: linear-gradient(135deg, #40464d, #353b42);
   border: 1px solid var(--border);
   border-radius: 14px;
   padding: 22px;
@@ -41,7 +41,7 @@ code, pre {
   font-family: Consolas, "Courier New", monospace;
 }
 pre {
-  background: #0e1526;
+  background: #2a2f35;
   border: 1px solid var(--border);
   border-radius: 8px;
   padding: 10px;
@@ -50,6 +50,16 @@ pre {
 .stamp { color: var(--muted); font-size: 0.95rem; }
 .repo { margin: 0; }
 ul, ol { margin-top: 6px; }
+figure {
+  margin: 10px 0 16px;
+}
+figure img {
+  width: 100%;
+  height: auto;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  display: block;
+}
 @media (max-width: 700px) {
   h1 { font-size: 1.5rem; }
   .wrap { padding: 14px 10px 32px; }

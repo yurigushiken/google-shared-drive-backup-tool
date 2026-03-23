@@ -11,7 +11,7 @@
     <header class="hero">
       <h1>Lab Drive Backup Setup Guide</h1>
       <p>Google Shared Drive Backup Tool onboarding for lab members.</p>
-      <p class="stamp">Last updated: March 21, 2026 (America/New_York)</p>
+      <p class="stamp">Last updated: March 22, 2026 (America/New_York)</p>
       <p class="repo"><a href="https://github.com/yurigushiken/google-shared-drive-backup-tool">Repository</a></p>
     </header>
 
@@ -28,16 +28,31 @@
       <h2>2. Enable Required APIs</h2>
       <ol>
         <li>Go to <strong>APIs &amp; Services &gt; Library</strong>.</li>
+        <li>You should see the API Library landing page like this:</li>
+      </ol>
+      <figure>
+        <img src="./media/welcome-to-the-api-library.png" alt="Welcome to the API Library screen in Google Cloud Console">
+      </figure>
+      <ol start="3">
         <li>Enable <strong>Google Drive API</strong>.</li>
+      </ol>
+      <figure>
+        <img src="./media/close-up-google-drive-api-enabled.png" alt="Google Drive API enabled in Google Cloud Console">
+      </figure>
+      <ol start="4">
         <li>Enable <strong>Google Forms API</strong> (<code>forms.googleapis.com</code>).</li>
       </ol>
+      <figure>
+        <img src="./media/close-up-google-forms-api-enabled.png" alt="Google Forms API enabled in Google Cloud Console">
+      </figure>
       <p>Reference: <a href="https://developers.google.com/workspace/guides/enable-apis">Enable Workspace APIs</a></p>
     </section>
 
     <section>
-      <h2>3. Configure OAuth (Google Auth Platform)</h2>
+      <h2>3. Configure OAuth (Where To Click)</h2>
       <ol>
-        <li>Go to <strong>Google Auth platform</strong>.</li>
+        <li>In Google Cloud Console left menu, go to <strong>APIs &amp; Services</strong>.</li>
+        <li>Open <strong>Google Auth platform</strong> (or <strong>OAuth consent screen</strong> in older UI labels).</li>
         <li>Complete <strong>Branding</strong> (app name, support email, etc.).</li>
         <li>Set <strong>Audience</strong>:
           <ul>
@@ -64,7 +79,7 @@
     <section>
       <h2>4. Create Desktop OAuth Client</h2>
       <ol>
-        <li>Go to <strong>Google Auth platform &gt; Clients</strong>.</li>
+        <li>Go to <strong>Google Auth platform &gt; Clients</strong> in the same project.</li>
         <li>Create client: <strong>Desktop app</strong>.</li>
         <li>Download credentials JSON.</li>
       </ol>
@@ -82,7 +97,7 @@
         <li>Create your folder under <code>tokens</code>:
           <pre><code>mkdir E:\GoogleDriveBackupTool\tokens\your_name</code></pre>
         </li>
-        <li>Set active profile in <code>config.json</code>:
+        <li>Set active profile in <code>E:\GoogleDriveBackupTool\config.json</code>:
           <pre><code>"token_profile": "your_name"</code></pre>
         </li>
         <li>Or override per run:
@@ -98,7 +113,7 @@
           <pre><code>python drive_backup.py --token-profile your_name</code></pre>
         </li>
         <li>Browser opens Google sign-in and consent.</li>
-        <li>If you see "Google hasn’t verified this app" in test mode, choose <strong>Advanced</strong> and continue only if this is your trusted lab project.</li>
+        <li>If you see "Google hasn't verified this app" in test mode, choose <strong>Advanced</strong> and continue only if this is your trusted lab project.</li>
         <li>After success, token will be saved to:
           <pre><code>tokens\your_name\token.pickle</code></pre>
         </li>
@@ -108,20 +123,19 @@
     <section>
       <h2>7. Daily Use</h2>
       <ol>
-        <li>Run <code>update</code> mode for routine sync.</li>
-        <li>Use <code>full</code> only when intentionally creating a new baseline snapshot.</li>
-        <li>Review latest report under <code>reports\backup_report_*.txt</code>.</li>
+        <li>Run from <code>E:\GoogleDriveBackupTool</code>:
+          <pre><code>python drive_backup.py --token-profile your_name</code></pre>
+        </li>
+        <li>When prompted, choose:
+          <ul>
+            <li><code>update</code>: fast incremental backup into the latest mirror snapshot (daily/default).</li>
+            <li><code>full</code>: creates a brand new snapshot folder and downloads everything again.</li>
+          </ul>
+        </li>
+        <li>Check results in:
+          <pre><code>E:\GoogleDriveBackupTool\reports\backup_report_*.txt</code></pre>
+        </li>
       </ol>
-    </section>
-
-    <section>
-      <h2>Important Limits and Notes</h2>
-      <ul>
-        <li>Drive <code>files.export</code> output is limited to 10 MB. Large Google Docs/Sheets/Slides may need fallback export or manual handling.</li>
-        <li>This backup intentionally ignores Google Drive shortcuts (links), not target file content.</li>
-        <li>Forms are backed up through Forms API as <code>.form.json</code> when scopes and access are correct.</li>
-      </ul>
-      <p>Reference: <a href="https://developers.google.com/workspace/drive/api/reference/rest/v3/files/export">Drive files.export (10 MB limit)</a></p>
     </section>
   </main>
 </body>
